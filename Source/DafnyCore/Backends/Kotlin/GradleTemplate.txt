@@ -1,0 +1,40 @@
+plugins {
+    kotlin("jvm") version "1.9.0"
+    application
+}
+
+group = "dafny"
+version = "1.0"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Kotlin standard library is included by default
+    testImplementation(kotlin("test"))
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
+kotlin {
+    jvmToolchain(17)
+}
+
+application {
+    mainClass.set("MainKt")
+}
+
+tasks.jar {
+    manifest {
+        attributes["Main-Class"] = "MainKt"
+    }
+    from(sourceSets.main.get().output)
+    dependsOn(configurations.runtimeClasspath)
+    from({
+        configurations.runtimeClasspath.get().filter { it.name.endsWith("jar") }.map { zipTree(it) }
+    })
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
