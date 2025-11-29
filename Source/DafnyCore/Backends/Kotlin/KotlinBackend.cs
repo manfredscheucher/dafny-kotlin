@@ -239,8 +239,8 @@ public class KotlinBackend : ExecutableBackend {
 
       // Copy DafnyRuntime Kotlin file to src/main/kotlin/dafny/
       try {
-        var runtimeFile = Path.Combine(Path.GetDirectoryName(typeof(KotlinBackend).Assembly.Location) ?? "", "..", "..", "Backends", "Kotlin", "DafnyRuntimeKotlin.kt");
-        var runtimeFile2 = "/Users/manfred/github/dafny-kotlin/Source/DafnyCore/Backends/Kotlin/DafnyRuntimeKotlin.kt";
+        var runtimeFile = Path.Combine(Path.GetDirectoryName(typeof(KotlinBackend).Assembly.Location) ?? "", "..", "..", "..", "DafnyRuntime", "DafnyRuntimeKotlin", "src", "main", "kotlin", "dafny", "DafnyRuntimeKotlin.kt");
+        var runtimeFile2 = "/Users/manfred/github/dafny-kotlin/Source/DafnyRuntime/DafnyRuntimeKotlin/src/main/kotlin/dafny/DafnyRuntimeKotlin.kt";
 
         var actualRuntimeFile = File.Exists(runtimeFile) ? runtimeFile : runtimeFile2;
         if (File.Exists(actualRuntimeFile)) {
