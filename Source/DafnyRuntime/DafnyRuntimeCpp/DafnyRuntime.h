@@ -15,6 +15,176 @@
 #include <cstdint>
 #include <variant>
 #include <exception>
+#include <functional>
+
+// GMP-backed arbitrary-precision integers (mpz_class) power the
+// `c++-extended` compilation target's `int` type; exact Dafny `real` is backed
+// by the DafnyReal class below (an UNREDUCED num/den pair of mpz_class,
+// mirroring C#'s Dafny.BigRational — see the comment on DafnyReal). The plain
+// `c++` target never emits these types, so the header only pulls in <gmpxx.h>
+// when it is actually available (the extended backend adds -I/opt/homebrew/include
+// and links -lgmpxx -lgmp; the minimal target does not). Guarded so the minimal
+// `c++` target keeps compiling GMP-free.
+#if __has_include(<gmpxx.h>)
+#define DAFNY_USE_GMP 1
+#include <gmpxx.h>
+
+// ---------------------------------------------------------------------------
+// Reals (Dafny `real`) as an UNREDUCED rational num/den, mirroring C#'s
+// Dafny.BigRational.
+//
+// A Dafny `real` is an EXACT rational, not a float. We represent it as two
+// mpz_class (num, den) with the invariant `1 <= den` (or num == 0). CRUCIALLY
+// we do NOT keep it reduced: C#'s BigRational multiplies/divides WITHOUT
+// reducing (`*` = num*num / den*den), so 1.5/0.5 is stored as 150/50, not 3/1.
+// Its ToString then pads the decimal to the trailing-zero count implied by the
+// unreduced denominator's 2/5 factors ("3.00", not "3.0"). Using GMP's mpq_class
+// (always canonical/reduced) instead prints "3.0" and diverges from every other
+// Dafny backend. So we mirror BigRational's exact num/den arithmetic here.
+// ---------------------------------------------------------------------------
+class DafnyReal {
+ public:
+  mpz_class num, den;   // invariant: den >= 1 (or num == 0)
+
+  DafnyReal() : num(0), den(1) {}
+  DafnyReal(const mpz_class& n, const mpz_class& d) : num(n), den(d) {}
+  // From an unbounded integer: n/1.
+  explicit DafnyReal(const mpz_class& n) : num(n), den(1) {}
+  explicit DafnyReal(long n) : num(n), den(1) {}
+  // From a numerator/denominator decimal-string pair, e.g. "15","10" for 1.5.
+  // The frontend hands us the literal's exact num/den; keep them UNREDUCED so
+  // the printed precision matches C#.
+  DafnyReal(const char* n, const char* d) : num(n), den(d) {}
+
+  // C#'s BigRational.Normalize: reduce the two denominators by their gcd first,
+  // so the common denominator is a.den * (b.den/gcd), NOT the raw product. This
+  // is what makes 0.5+0.5 print "1.0" (den 10, not 100) and 0.75-0.25 print
+  // "0.50" (den 100, not 10000). If either operand is 0, the other's num/den is
+  // used as-is. Fills aa, bb, dd such that the values are aa/dd and bb/dd.
+  static void Normalize(const DafnyReal& a, const DafnyReal& b,
+                        mpz_class& aa, mpz_class& bb, mpz_class& dd) {
+    if (sgn(a.num) == 0) {
+      aa = a.num; bb = b.num; dd = b.den;
+    } else if (sgn(b.num) == 0) {
+      aa = a.num; dd = a.den; bb = b.num;
+    } else {
+      mpz_class g, xx, yy;
+      mpz_gcd(g.get_mpz_t(), a.den.get_mpz_t(), b.den.get_mpz_t());
+      mpz_divexact(xx.get_mpz_t(), a.den.get_mpz_t(), g.get_mpz_t());
+      mpz_divexact(yy.get_mpz_t(), b.den.get_mpz_t(), g.get_mpz_t());
+      aa = a.num * yy;
+      bb = b.num * xx;
+      dd = a.den * yy;
+    }
+  }
+
+  DafnyReal operator+(const DafnyReal& b) const {
+    mpz_class aa, bb, dd; Normalize(*this, b, aa, bb, dd);
+    return DafnyReal(mpz_class(aa + bb), dd);
+  }
+  DafnyReal operator-(const DafnyReal& b) const {
+    mpz_class aa, bb, dd; Normalize(*this, b, aa, bb, dd);
+    return DafnyReal(mpz_class(aa - bb), dd);
+  }
+  // BigRational: num*num / den*den, UNREDUCED.
+  DafnyReal operator*(const DafnyReal& b) const {
+    return DafnyReal(mpz_class(num * b.num), mpz_class(den * b.den));
+  }
+  // BigRational: a * reciprocal(b), keeping den >= 1. reciprocal(b) = b.den/b.num
+  // (with the sign moved onto the numerator when b.num < 0). UNREDUCED.
+  DafnyReal operator/(const DafnyReal& b) const {
+    if (sgn(b.num) > 0) {
+      return DafnyReal(mpz_class(num * b.den), mpz_class(den * b.num));
+    } else {
+      // b.num < 0: reciprocal is (-b.den)/(-b.num) to keep den positive.
+      return DafnyReal(mpz_class(num * mpz_class(-b.den)),
+                       mpz_class(den * mpz_class(-b.num)));
+    }
+  }
+  DafnyReal operator-() const { return DafnyReal(mpz_class(-num), den); }
+
+  // Compare by cross-multiplication: sign(a.num*b.den - b.num*a.den), valid
+  // because both denominators are >= 1 (positive). Matches BigRational.CompareTo.
+  int cmp(const DafnyReal& b) const {
+    return ::cmp(mpz_class(num * b.den), mpz_class(b.num * den));
+  }
+  bool operator==(const DafnyReal& b) const { return cmp(b) == 0; }
+  bool operator!=(const DafnyReal& b) const { return cmp(b) != 0; }
+  bool operator<(const DafnyReal& b) const { return cmp(b) < 0; }
+  bool operator<=(const DafnyReal& b) const { return cmp(b) <= 0; }
+  bool operator>(const DafnyReal& b) const { return cmp(b) > 0; }
+  bool operator>=(const DafnyReal& b) const { return cmp(b) >= 0; }
+
+  // real -> int, flooring toward negative infinity (Dafny's `.Floor`, and the
+  // target for `r as int` when r is provably integral). Works on the unreduced
+  // fraction: floor(num/den) with den >= 1.
+  mpz_class Floor() const {
+    mpz_class f;
+    mpz_fdiv_q(f.get_mpz_t(), num.get_mpz_t(), den.get_mpz_t());
+    return f;
+  }
+};
+
+// GMP's C++ wrappers do not provide std::hash specializations, but Dafny stores
+// int/real values in hash-based collections (sets/maps/multisets). Provide them
+// so DafnySet<mpz_class> / DafnySet<DafnyReal> etc. compile.
+namespace std {
+  template <> struct hash<mpz_class> {
+    size_t operator()(const mpz_class& x) const {
+      return std::hash<std::string>()(x.get_str());
+    }
+  };
+  // Value hash for Dafny `real`. The stored num/den are UNREDUCED, so equal
+  // values (e.g. 3/1 and 150/50) have different num/den; we must hash the
+  // REDUCED form so they collide, matching DafnyReal::operator== (which compares
+  // by value). Reduce a copy via the gcd, keeping den > 0, then hash the
+  // canonical "num/den" string.
+  template <> struct hash<DafnyReal> {
+    size_t operator()(const DafnyReal& x) const {
+      mpz_class num = x.num, den = x.den;
+      if (sgn(num) == 0) {
+        den = 1;                       // 0/d normalizes to 0/1
+      } else {
+        mpz_class g;
+        mpz_gcd(g.get_mpz_t(), num.get_mpz_t(), den.get_mpz_t());
+        mpz_divexact(num.get_mpz_t(), num.get_mpz_t(), g.get_mpz_t());
+        mpz_divexact(den.get_mpz_t(), den.get_mpz_t(), g.get_mpz_t());
+        if (sgn(den) < 0) { num = -num; den = -den; }
+      }
+      return std::hash<std::string>()(num.get_str() + "/" + den.get_str());
+    }
+  };
+}
+
+// Dafny defines integer division/modulo as EUCLIDEAN: a == (a/b)*b + a%b with
+// 0 <= a%b < |b|. GMP's operator/ and operator% truncate toward zero, so route
+// int Div/Mod through these helpers (used by the c++-extended back-end).
+inline mpz_class DafnyEuclideanDiv(const mpz_class& a, const mpz_class& b) {
+  mpz_class q;
+  if (sgn(b) > 0) {
+    mpz_fdiv_q(q.get_mpz_t(), a.get_mpz_t(), b.get_mpz_t());
+  } else {
+    mpz_cdiv_q(q.get_mpz_t(), a.get_mpz_t(), b.get_mpz_t());
+  }
+  return q;
+}
+
+inline mpz_class DafnyEuclideanMod(const mpz_class& a, const mpz_class& b) {
+  mpz_class r;
+  mpz_class babs = abs(b);
+  mpz_mod(r.get_mpz_t(), a.get_mpz_t(), babs.get_mpz_t());   // 0 <= r < |b|
+  return r;
+}
+
+// Materialize a value of Dafny type `int` / `real` into a concrete
+// mpz_class / mpq_class. Overloads let the concrete GMP type pass through while
+// disambiguating cardinality results (|s|, |m|, ...) which come back as a plain
+// uint64 (unsigned long long) that mpz_class(...) cannot construct without an
+// ambiguity. Used by the c++-extended back-end's print path.
+inline mpz_class dafny_as_int(const mpz_class& x) { return x; }
+inline mpz_class dafny_as_int(unsigned long long x) { return mpz_class((unsigned long)x); }
+inline DafnyReal dafny_as_real(const DafnyReal& x) { return x; }
+#endif
 
 typedef uint8_t  uint8;
 typedef uint16_t uint16;
@@ -132,6 +302,84 @@ void dafny_print(std::shared_ptr<T> x) {
   }
 }
 
+#ifdef DAFNY_USE_GMP
+// Unbounded Dafny `int` prints as a plain decimal. These are non-template
+// OVERLOADS (not specializations of dafny_print<T>): arithmetic on mpz_class /
+// mpq_class yields GMP expression-template types, which materialize into
+// mpz_class / mpq_class through these overloads' by-value parameters. A
+// template specialization would be bypassed by those expression types.
+inline void dafny_print(mpz_class x) {
+  std::cout << x.get_str();
+}
+
+// DividesAPowerOf10: returns true if `d` (>= 1) divides some 10^k, i.e. it has
+// only factors 2 and 5. On success `factor` and `log10` satisfy
+//   10^log10 == factor * d
+inline bool dafny__divides_pow10(const mpz_class& d_in, mpz_class& factor, int& log10) {
+  mpz_class i = d_in;
+  factor = 1;
+  log10 = 0;
+  if (sgn(i) <= 0) { return false; }
+  while (mpz_divisible_ui_p(i.get_mpz_t(), 10)) { i /= 10; log10++; }
+  while (mpz_divisible_ui_p(i.get_mpz_t(), 5))  { i /= 5;  factor *= 2; log10++; }
+  while (mpz_divisible_ui_p(i.get_mpz_t(), 2))  { i /= 2;  factor *= 5; log10++; }
+  return i == 1;
+}
+
+// Print a real EXACTLY the way Dafny's BigRational.ToString does, operating on
+// the UNREDUCED num/den (so trailing-zero precision matches C#, e.g. 150/50 ->
+// "3.00"):
+//   * whole numbers ("num == 0 || den == 1")           -> "<num>.0"
+//   * terminating decimals (den has only 2/5 factors)  -> "<int>.<frac>"
+//   * everything else (non-terminating, e.g. 1/3)      -> "(<num>.0 / <den>.0)"
+// Core formatter: writes to any ostream so it serves both the top-level
+// dafny_print(DafnyReal) and operator<<(ostream&, DafnyReal) used when a real is
+// nested inside a printed collection/tuple/datatype.
+inline void dafny_real_write(std::ostream& os, const DafnyReal& x) {
+  const mpz_class& num = x.num;
+  const mpz_class& den = x.den;
+
+  if (sgn(num) == 0 || den == 1) {
+    os << num.get_str() << ".0";
+    return;
+  }
+
+  mpz_class factor;
+  int log10;
+  if (dafny__divides_pow10(den, factor, log10)) {
+    // n = num * factor; place decimal point log10 digits from the right.
+    mpz_class n = num * factor;
+    bool neg = (sgn(n) < 0);
+    if (neg) { n = -n; }
+    std::string digits = n.get_str();   // no sign
+    int dlen = (int)digits.size();
+    if (neg) { os << "-"; }
+    if (log10 < dlen) {
+      int digitCount = dlen - log10;
+      os << digits.substr(0, digitCount) << "."
+         << digits.substr(digitCount);
+    } else {
+      // 0.<zeros><digits>
+      os << "0.";
+      for (int k = 0; k < log10 - dlen; k++) { os << "0"; }
+      os << digits;
+    }
+  } else {
+    // Non-terminating: exact fraction form "(num.0 / den.0)".
+    os << "(" << num.get_str() << ".0 / " << den.get_str() << ".0)";
+  }
+}
+
+inline void dafny_print(DafnyReal x) { dafny_real_write(std::cout, x); }
+
+// Needed when a real is an element of a printed collection/tuple/datatype: the
+// generic collection printers do `os << element`.
+inline std::ostream& operator<<(std::ostream& os, const DafnyReal& x) {
+  dafny_real_write(os, x);
+  return os;
+}
+#endif
+
 /*********************************************************
  *  DEFAULTS                                             *
  *********************************************************/
@@ -140,6 +388,22 @@ template<typename T>
 struct get_default {
   static T call();
 };
+
+#ifdef DAFNY_USE_GMP
+// The c++-extended target's own value types need a default too, otherwise a
+// Tuple<mpz_class, ...> or a default-constructed field references an undefined
+// get_default<mpz_class>::call() at link time. Match TypeInitializationValue in
+// the extended generator: int -> mpz_class(0), real -> DafnyReal(0).
+template<>
+struct get_default<mpz_class> {
+  static mpz_class call() { return mpz_class(0); }
+};
+
+template<>
+struct get_default<DafnyReal> {
+  static DafnyReal call() { return DafnyReal(0L); }
+};
+#endif
 
 template<>
 struct get_default<bool> {
@@ -684,6 +948,173 @@ struct std::hash<DafnySet<U>> {
     size_t operator()(const DafnySet<U>& s) const {
         size_t seed = 0;
         for (auto const& elt:s.set) {
+            hash_combine<U>(seed, elt);
+        }
+        return seed;
+    }
+};
+
+
+/*********************************************************
+ *  MULTISETS                                            *
+ *********************************************************/
+
+// A Dafny `multiset<T>` (used by the `c++-extended` target). Backed by
+// std::unordered_multiset<T>, so multiplicities and set-like operations come
+// straight from the STL rather than a hand-rolled structure.
+//   * multiplicity(x)  -> m[x]
+//   * size()           -> |m|
+//   * contains(x)      -> x in m
+// Union/Intersection/Difference follow Dafny multiset semantics (per-element
+// max/min/truncated-subtraction of multiplicities).
+template <class T>
+struct DafnyMultiset {
+    std::unordered_multiset<T> multiset;
+
+    DafnyMultiset() {}
+    DafnyMultiset(const DafnyMultiset<T>& other) {
+        multiset = std::unordered_multiset<T>(other.multiset);
+    }
+    DafnyMultiset(std::initializer_list<T> il) {
+        std::unordered_multiset<T> a(il);
+        multiset = a;
+    }
+
+    static DafnyMultiset<T> Create(std::initializer_list<T> il) {
+        DafnyMultiset<T> ret(il);
+        return ret;
+    }
+
+    static DafnyMultiset<T> empty() {
+        return DafnyMultiset();
+    }
+
+    // Multiplicity of x: m[x].
+    uint64 multiplicity(T t) const {
+        return multiset.count(t);
+    }
+
+    // m[x := n]: return a copy in which x has multiplicity EXACTLY n (matching
+    // Dafny's IMultiSet.Update — set, not add). Remove all existing copies of x,
+    // then insert n of them.
+    DafnyMultiset<T> update(T t, uint64 n) const {
+        DafnyMultiset<T> ret(*this);
+        ret.multiset.erase(t);
+        for (uint64 i = 0; i < n; i++) { ret.multiset.insert(t); }
+        return ret;
+    }
+
+    // |m|: total number of elements (counting duplicates).
+    uint64 size() const { return multiset.size(); }
+
+    bool isEmpty() const { return multiset.empty(); }
+
+    // x in m  <=>  multiplicity(x) > 0
+    bool contains(T t) const {
+        return multiset.find(t) != multiset.end();
+    }
+
+    // Distinct elements present in this multiset (each once).
+    std::unordered_set<T> keys() const {
+        std::unordered_set<T> ks;
+        for (auto const& e : multiset) { ks.insert(e); }
+        return ks;
+    }
+
+    // Multiset union (Dafny `+`): multiplicity = SUM of the two.
+    DafnyMultiset<T> Union(const DafnyMultiset<T>& other) const {
+        DafnyMultiset<T> ret;
+        for (auto const& e : multiset) { ret.multiset.insert(e); }
+        for (auto const& e : other.multiset) { ret.multiset.insert(e); }
+        return ret;
+    }
+
+    // Multiset intersection: multiplicity = min of the two.
+    DafnyMultiset<T> Intersection(const DafnyMultiset<T>& other) const {
+        DafnyMultiset<T> ret;
+        for (auto const& k : keys()) {
+            uint64 a = multiplicity(k), b = other.multiplicity(k);
+            uint64 m = a < b ? a : b;
+            for (uint64 i = 0; i < m; i++) { ret.multiset.insert(k); }
+        }
+        return ret;
+    }
+
+    // Multiset difference: truncated subtraction of multiplicities.
+    DafnyMultiset<T> Difference(const DafnyMultiset<T>& other) const {
+        DafnyMultiset<T> ret;
+        for (auto const& k : keys()) {
+            uint64 a = multiplicity(k), b = other.multiplicity(k);
+            uint64 m = a > b ? a - b : 0;
+            for (uint64 i = 0; i < m; i++) { ret.multiset.insert(k); }
+        }
+        return ret;
+    }
+
+    bool IsSubsetOf(const DafnyMultiset<T>& other) const {
+        for (auto const& k : keys()) {
+            if (multiplicity(k) > other.multiplicity(k)) { return false; }
+        }
+        return true;
+    }
+
+    bool IsSupersetOf(const DafnyMultiset<T>& other) const {
+        return other.IsSubsetOf(*this);
+    }
+
+    bool IsProperSubsetOf(const DafnyMultiset<T>& other) const {
+        return IsSubsetOf(other) && size() < other.size();
+    }
+
+    bool IsProperSupersetOf(const DafnyMultiset<T>& other) const {
+        return other.IsProperSubsetOf(*this);
+    }
+
+    bool IsDisjointFrom(const DafnyMultiset<T>& other) const {
+        for (auto const& k : keys()) {
+            if (other.multiplicity(k) > 0) { return false; }
+        }
+        return true;
+    }
+
+    bool equals(const DafnyMultiset<T>& other) const {
+        return IsSubsetOf(other) && other.IsSubsetOf(*this);
+    }
+};
+
+template <typename U>
+bool operator==(const DafnyMultiset<U> &s0, const DafnyMultiset<U> &s1) {
+    return s0.equals(s1);
+}
+
+template <typename U>
+bool operator!=(const DafnyMultiset<U> &s0, const DafnyMultiset<U> &s1) {
+    return !s0.equals(s1);
+}
+
+// Print like the other Dafny back-ends: "multiset{a, b, b, ...}" listing every
+// element (with repetitions), grouped so equal elements are adjacent.
+template <typename U>
+inline std::ostream& operator<<(std::ostream& out, const DafnyMultiset<U>& val){
+    out << "multiset{";
+    bool first = true;
+    for (auto const& k : val.keys()) {
+        uint64 m = val.multiplicity(k);
+        for (uint64 i = 0; i < m; i++) {
+            if (!first) { out << ", "; }
+            out << k;
+            first = false;
+        }
+    }
+    out << "}";
+    return out;
+}
+
+template <typename U>
+struct std::hash<DafnyMultiset<U>> {
+    size_t operator()(const DafnyMultiset<U>& s) const {
+        size_t seed = 0;
+        for (auto const& elt:s.multiset) {
             hash_combine<U>(seed, elt);
         }
         return seed;

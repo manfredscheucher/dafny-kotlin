@@ -1933,6 +1933,19 @@ implementation.
 - The current backend also assumes the use of C++17 in order to cleanly and
   performantly implement datatypes.
 
+#### 13.8.9.1. C++-extended
+
+The experimental `c++-extended` target is the C++ backend extended with the
+features the minimal `cpp` target rejects: unbounded `int` and exact `real` (via
+GMP), `multiset` (via `std::unordered_multiset`), and function values / lambdas
+(via `std::function`). The plain `cpp` target is unchanged and stays GMP-free.
+
+- `dafny translate c++-extended A.dfy --unicode-char:false`
+- `dafny build -t:c++-extended A.dfy --unicode-char:false`
+
+Compiling its output needs a C++17 compiler with GMP available. Details are in
+[this separate document](integration-cpp-extended/IntegrationCppExtended).
+
 ### 13.8.10. Supported features by target language {#sec-supported-features-by-target-language}
 
 Some Dafny features are not supported by every target language.
