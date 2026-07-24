@@ -1933,7 +1933,35 @@ implementation.
 - The current backend also assumes the use of C++17 in order to cleanly and
   performantly implement datatypes.
 
-### 13.8.10. Supported features by target language {#sec-supported-features-by-target-language}
+### 13.8.10. C
+
+The C backend is experimental. It began as a standalone copy of the C++ backend
+but has diverged substantially: it emits plain C11 (no namespaces, no templates,
+no `std::`/`shared_ptr`) with its own struct-based data model and a
+monomorphisation engine in place of C++ templates. It emits a `.c` and `.h` file
+and compiles them with `gcc -std=c11`. There are two targets:
+
+- `c` — the minimal target. Like the `cpp` backend it does not support unbounded
+  `int`, exact `real`, `multiset`, function values / lambdas, or `array.Length`
+  (which yields an unbounded `int`); it needs no GMP and compiles GMP-free.
+- `c-extended` — adds all of the above: unbounded `int` and exact-rational `real`
+  (via GMP `mpz_t`/`mpq_t`), `multiset`, function values / lambdas (as closure
+  structs), and `array.Length`. Its output is compiled with GMP (`-lgmp`).
+
+```
+dafny translate c A.dfy --unicode-char:false
+dafny build -t:c-extended A.dfy --unicode-char:false
+```
+
+Both targets support (with generics handled by monomorphisation):
+sequences/strings, sets/maps (as hash tables), datatypes (incl. recursive),
+reference classes, 1-D arrays, and tuples. Not yet supported (rejected cleanly):
+traits, iterators, coinductive types, multi-dimensional arrays, and quantifiers
+in executable code. Examples and
+details of how the C backend relates to the C++ backend are in
+[this separate document](integration-c/IntegrationC).
+
+### 13.8.11. Supported features by target language {#sec-supported-features-by-target-language}
 
 Some Dafny features are not supported by every target language.
 The table below shows which features are supported by each backend.

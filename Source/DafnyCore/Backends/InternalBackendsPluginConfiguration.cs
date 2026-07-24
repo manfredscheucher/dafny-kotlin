@@ -13,6 +13,8 @@ internal class InternalBackendsPluginConfiguration : Plugins.PluginConfiguration
       new JavaBackend(options),
       new PythonBackend(options),
       new CppBackend(options),
+      new CBackend(options),
+      new CExtendedBackend(options),
       new LibraryBackend(options),
       new RustBackend(options),
       new ResolvedDesugaredExecutableDafnyBackend(options)
