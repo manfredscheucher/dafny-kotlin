@@ -614,7 +614,48 @@ namespace Microsoft.Dafny.Compilers {
         }
       }
 
+      EmitDatatypePrintOperator(dt, DtT_protected, wdef);
       return null;
+    }
+
+    // Emit `operator<<` for a datatype so `print d` produces `Typename.Ctor` (or
+    // `Typename.Ctor(f0, f1)` when the constructor has fields), matching the
+    // C#/Java backends. Without this, printing a datatype value fails to compile
+    // (the generic dafny_print<T> does `std::cout << x`, and no operator<< exists).
+    private void EmitDatatypePrintOperator(DatatypeDecl dt, string DtT_protected, ConcreteSyntaxTree wdef) {
+      var w = wdef.NewNamedBlock(
+        "{0}\ninline std::ostream& operator<<(std::ostream& out, const {1}{2}& d)",
+        DeclareTemplate(dt.TypeArgs), DtT_protected, InstantiateTemplate(dt.TypeArgs));
+      w.WriteLine("(void)d;");
+      foreach (var ctor in dt.Ctors.Where(c => !c.IsGhost)) {
+        // Fully-qualified constructor label: `Typename.CtorName`.
+        var label = dt.Name + "." + ctor.Name;
+        // Field accessor prefix: record types store fields inline; tagged unions
+        // read them out of the active std::variant alternative.
+        var access = dt.IsRecordType
+          ? "d."
+          : String.Format("std::get<{0}>(d.v).", DatatypeSubStructName(ctor, true));
+        var body = dt.IsRecordType ? w : w.NewBlock(String.Format("if (d.is_{0}())", DatatypeSubStructName(ctor)));
+        body.WriteLine("out << \"{0}\";", label);
+        var nonGhost = ctor.Formals.Where(f => !f.IsGhost).ToList();
+        if (nonGhost.Count > 0) {
+          body.WriteLine("out << \"(\";");
+          var i = 0;
+          var idx = 0;
+          foreach (var arg in ctor.Formals) {
+            if (arg.IsGhost) { continue; }
+            if (idx > 0) { body.WriteLine("out << \", \";"); }
+            // Recursive fields are stored as shared_ptr — deref to print the value.
+            var isRecursive = arg.Type is UserDefinedType udt && udt.ResolvedClass == dt;
+            body.WriteLine("dafny_print_to(out, {0}{1}{2});", isRecursive ? "*" : "", access, FormalName(arg, i));
+            i++;
+            idx++;
+          }
+          body.WriteLine("out << \")\";");
+        }
+        if (dt.IsRecordType) { break; }  // single constructor, no branching
+      }
+      w.WriteLine("return out;");
     }
 
     protected override IClassWriter DeclareNewtype(NewtypeDecl nt, ConcreteSyntaxTree wr) {
