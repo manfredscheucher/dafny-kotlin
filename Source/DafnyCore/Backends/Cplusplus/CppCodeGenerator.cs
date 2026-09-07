@@ -324,6 +324,12 @@ namespace Microsoft.Dafny.Compilers {
     public override bool SupportsDatatypeWrapperErasure => false;
 
     protected override IClassWriter DeclareDatatype(DatatypeDecl dt, ConcreteSyntaxTree writer) {
+      if (dt is CoDatatypeDecl) {
+        // Codatatypes aren't supported. Reject here at declaration time (like
+        // CreateIterator) rather than compiling the decl as if inductive and then
+        // panicking later when a destructor head turns out to be co-inductive.
+        throw new UnsupportedFeatureException(dt.Origin, Feature.Codatatypes);
+      }
       if (dt is TupleTypeDecl) {
         // Tuple types are declared once and for all in DafnyRuntime.h
         return null;
@@ -1834,9 +1840,10 @@ namespace Microsoft.Dafny.Compilers {
           return SuffixLvalue(obj, ".{0}", compiledName);
         } else if (sf is DatatypeDestructor dtor2) {
           if (!(dtor2.EnclosingClass is IndDatatypeDecl)) {
-            UnsupportedFeatureError(dtor2.Origin, Feature.Codatatypes, null,
-              "Unexpected use of a destructor {0} that isn't for an inductive datatype.  Panic!",
-                member.Name);
+            // Codatatype destructor (e.g. a co-inductive stream's head/tail).
+            // Reject cleanly; UnsupportedFeatureError only reports and returns, which
+            // would then null-deref the IndDatatypeDecl cast below and crash.
+            throw new UnsupportedFeatureException(dtor2.Origin, Feature.Codatatypes);
           }
 
           var dt = dtor2.EnclosingClass as IndDatatypeDecl;

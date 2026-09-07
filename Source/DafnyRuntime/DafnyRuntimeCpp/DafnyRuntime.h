@@ -1136,8 +1136,12 @@ struct DafnyMap {
     }
 
     DafnyMap(std::initializer_list<std::pair<const K,V>> il) {
-        std::unordered_map<K,V> a_map(il);
-        map = a_map;
+        // Dafny map-literal semantics: on a duplicate key the LAST value wins.
+        // std::unordered_map's initializer-list ctor uses insert(), which KEEPS the
+        // first and drops later duplicates, so assign element-by-element instead.
+        for (const auto& kv : il) {
+            map[kv.first] = kv.second;
+        }
     }
 
     static DafnyMap<K,V> Create(std::initializer_list<std::pair<const K,V>> il) {
