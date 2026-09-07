@@ -3011,8 +3011,11 @@ namespace Microsoft.Dafny.Compilers {
         if (t.NativeType != null) {
           return "0";
         } else {
-          Warn("Non-native bitvector type used.  Code will not compile.", tok);
-          return "new BigNumber(0)";
+          // Wide bitvectors (bv65+) have no native C type. Reject cleanly, matching the
+          // TypeName rejection above, rather than emit "new BigNumber(0)" (invalid C,
+          // and previously only warned).
+          throw new UnsupportedFeatureException(tok ?? Token.NoToken, Feature.RuntimeTypeDescriptors,
+            "bitvectors wider than 64 bits are not supported by the C backend");
         }
       } else if (xType is SetType) {
         var s = (SetType)xType;
