@@ -3011,9 +3011,15 @@ namespace Microsoft.Dafny.Compilers {
         if (t.NativeType != null) {
           return "0";
         } else {
-          // Wide bitvectors (bv65+) have no native C type. Reject cleanly, matching the
-          // TypeName rejection above, rather than emit "new BigNumber(0)" (invalid C,
-          // and previously only warned).
+          // Wide bitvectors (bv65+) have no native C type. In the DISCARDED generic-
+          // template pass (activeSubst == null) the output is never compiled, so emit a
+          // harmless placeholder rather than abort a program that has a valid concrete
+          // instantiation (same guard as the type-parameter / UDT reject sites). Otherwise
+          // reject cleanly, matching the TypeName rejection, rather than emit
+          // "new BigNumber(0)" (invalid C, and previously only warned).
+          if (activeSubst == null) {
+            return "0";
+          }
           throw new UnsupportedFeatureException(tok ?? Token.NoToken, Feature.RuntimeTypeDescriptors,
             "bitvectors wider than 64 bits are not supported by the C backend");
         }
